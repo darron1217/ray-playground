@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  ray-head:
+    image: rayproject/ray:2.46.0-py312
+    container_name: ray_head
+    ports:
+      # Ray Dashboard
+      - "8265:8265"
+      # Ray Client
+      - "10001:10001"
+      # GCS
+      - "6379:6379"
+    shm_size: '3gb'
+    command: >
+      ray start --head
+      --object-store-memory=3000000000
+      --node-ip-address=0.0.0.0
+      --dashboard-host=0.0.0.0
+      --num-cpus=3
+      --resources='{"node1": 3}'
+      --block
+    #  --plasma-directory=/tmp
+    volumes:
+      - ./test_ray_object_copy.py:/home/ray/test_ray_object_copy.py
+      - ./cluster_memory_monitor.py:/home/ray/cluster_memory_monitor.py
+
+  ray-worker:
+    image: rayproject/ray:2.46.0-py312
+    container_name: ray_worker
+    depends_on:
+      - ray-head
+    shm_size: '3gb'
+    command: >
+      ray start 
+      --object-store-memory=3000000000
+      --address=ray-head:6379
+      --num-cpus=3
+      --resources='{"node2": 3}'
+      --block
+    #  --plasma-directory=/tmp

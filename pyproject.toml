@@ -1,0 +1,15 @@
+[project]
+name = "ray-playground"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Darron Park",email = "darron1217@gmail.com"}
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.dependencies]
+python = "3.12.9"
+ray = {version = "2.46.0", extras = ["default","serve","client"]}
