@@ -3,7 +3,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tokio::sync::mpsc;
-use risc0_zkvm::{ExecutorEnv, ExecutorImpl, NullSegmentRef, Segment};
+use risc0_zkvm::{CoprocessorCallback, Digest, ExecutorEnv, ExecutorImpl, NullSegmentRef, ProveKeccakRequest, ProveZkrRequest, Segment};
 
 const V2_ELF_MAGIC: &[u8] = b"R0BF";
 
@@ -24,6 +24,58 @@ struct Args {
     output_dir: String,
 }
 
+pub type KeccakState = [u64; 25];
+
+#[derive(Serialize)]
+struct SerializableKeccakRequest {
+    /// The digest of the claim that this keccak input is expected to produce.
+    pub claim_digest: Digest,
+
+    /// The requested size of the keccak proof, in powers of 2.
+    pub po2: usize,
+
+    /// The control root which identifies a particular keccak circuit revision.
+    pub control_root: Digest,
+
+    /// Input transcript to provide to the keccak circuit.
+    pub input: Vec<KeccakState>,
+}
+
+impl From<&ProveKeccakRequest> for SerializableKeccakRequest {
+    fn from(req: &ProveKeccakRequest) -> Self {
+        SerializableKeccakRequest {
+            claim_digest: req.claim_digest,
+            po2: req.po2,
+            control_root: req.control_root,
+            input: req.input.clone(),
+        }
+    }
+}
+
+struct Coprocessor {
+    keccak_tx: tokio::sync::mpsc::Sender<ProveKeccakRequest>,
+}
+
+impl Coprocessor {
+    fn new(keccak_tx: tokio::sync::mpsc::Sender<ProveKeccakRequest>) -> Self {
+        Self { keccak_tx }
+    }
+}
+
+impl CoprocessorCallback for Coprocessor {
+    fn prove_keccak(&mut self, request: ProveKeccakRequest) -> Result<()> {
+        if let Err(_) = self.keccak_tx.blocking_send(request) {
+            println!("Failed to send Keccak proof request");
+        }
+        Ok(())
+    }
+
+    fn prove_zkr(&mut self, _request: ProveZkrRequest) -> Result<()> {
+        // TODO: Implement ZKR proving when needed
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LocalExecutionResult {
     status: String,
@@ -31,6 +83,7 @@ struct LocalExecutionResult {
     user_cycles: u64,
     total_cycles: u64,
     segment_count: usize,
+    keccak_count: usize,
     execution_time_ms: u128,
     error: Option<String>,
 }
@@ -39,6 +92,7 @@ struct ExecutionResult {
     user_cycles: u64,
     total_cycles: u64,
     segment_count: usize,
+    keccak_count: usize,
     output: Vec<u8>,
 }
 
@@ -97,6 +151,7 @@ impl LocalExecutor {
             user_cycles: result.user_cycles,
             total_cycles: result.total_cycles,
             segment_count: result.segment_count,
+            keccak_count: result.keccak_count,
             execution_time_ms: execution_time,
             error: None,
         })
@@ -105,17 +160,19 @@ impl LocalExecutor {
 
     async fn execute_with_zkvm(&self, elf_data: &[u8], input_data: &[u8], output_dir: &str) -> Result<ExecutionResult> {
         let (segment_tx, mut segment_rx) = mpsc::channel::<Segment>(100);
+        let (keccak_tx, mut keccak_rx) = mpsc::channel::<ProveKeccakRequest>(100);
         
         // Clone data and sender for the blocking task
         let elf_data = elf_data.to_vec();
         let input_data = input_data.to_vec();
         let segment_tx_clone = segment_tx.clone();
-        
+        let keccak_tx_clone = keccak_tx.clone();
+
         // Spawn segment writer task
-        let output_dir = output_dir.to_string();
+        let segment_output_dir = output_dir.to_string();
         let segment_writer = tokio::spawn(async move {
             // Create output directory if it doesn't exist
-            if let Err(e) = fs::create_dir_all(&output_dir) {
+            if let Err(e) = fs::create_dir_all(&segment_output_dir) {
                 eprintln!("Failed to create output directory: {}", e);
                 return 0;
             }
@@ -126,7 +183,7 @@ impl LocalExecutor {
                 println!("Processing segment {}: index={}", segment_count, segment.index);
                 
                 // Save segment to file immediately
-                let segment_path = Path::new(&output_dir).join(format!("segment_{:04}.bin", segment.index));
+                let segment_path = Path::new(&segment_output_dir).join(format!("segment_{:04}.bin", segment.index));
                 if let Ok(segment_data) = bincode::serialize(&segment) {
                     if let Err(e) = fs::write(&segment_path, segment_data) {
                         eprintln!("Failed to save segment {}: {}", segment.index, e);
@@ -139,15 +196,38 @@ impl LocalExecutor {
             }
             segment_count
         });
+
+        let keccak_output_dir = output_dir.to_string();
+        let keccak_writer = tokio::spawn(async move {
+            let mut keccak_count = 0;
+            while let Some(request) = keccak_rx.recv().await {
+                keccak_count += 1;
+                println!("Received Keccak proof request: {}", keccak_count);
+
+                let keccak_path = Path::new(&keccak_output_dir).join(format!("keccak_{:04}.bin", keccak_count));
+                let serializable_request = SerializableKeccakRequest::from(&request);
+                if let Ok(keccak_data) = bincode::serialize(&serializable_request) {
+                    if let Err(e) = fs::write(&keccak_path, keccak_data) {
+                        eprintln!("Failed to save Keccak proof request {}: {}", keccak_count, e);
+                    } else {
+                        println!("Saved Keccak proof request {} to: {}", keccak_count, keccak_path.display());
+                    }
+                } else {
+                    eprintln!("Failed to serialize Keccak proof request {}", keccak_count);
+                }
+            }
+            keccak_count
+        });
         
         // Execute in blocking task (similar to reference code)
         let exec_limit = 100_000 * 1024 * 1024;
+        let coproc = Coprocessor::new(keccak_tx_clone.clone());
         let exec_task = tokio::task::spawn_blocking(move || -> Result<(u64, u64, Vec<u8>)> {
             // Build execution environment
-            let env = ExecutorEnv::builder()
-                .write_slice(&input_data)
+            let env = ExecutorEnv::builder().write_slice(&input_data)
                 .session_limit(Some(exec_limit)) // 10M cycle limit
-                .segment_limit_po2(22)
+                .coprocessor_callback(coproc)
+                .segment_limit_po2(21)
                 .build()
                 .context("Failed to build ExecutorEnv")?;
             
@@ -184,6 +264,9 @@ impl LocalExecutor {
         let segment_count = segment_writer.await
             .context("Failed to join segment writer")?;
         
+        let keccak_count = keccak_writer.await
+            .context("Failed to join keccak writer")?;
+
         println!("Execution completed: {} cycles (user: {}), {} segments", 
                 total_cycles, user_cycles, segment_count);
         
@@ -191,6 +274,7 @@ impl LocalExecutor {
             user_cycles,
             total_cycles,
             segment_count,
+            keccak_count,
             output,
         })
     }
@@ -243,6 +327,7 @@ async fn main() -> Result<()> {
     println!("  - User cycles: {}", result.user_cycles);
     println!("  - Total cycles: {}", result.total_cycles);
     println!("  - Segment count: {}", result.segment_count);
+    println!("  - Keccak count: {}", result.keccak_count);
     println!("  - Execution time: {}ms", result.execution_time_ms);
 
     // Save results to local storage
