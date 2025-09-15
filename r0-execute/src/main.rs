@@ -3,7 +3,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tokio::sync::mpsc;
-use risc0_zkvm::{CoprocessorCallback, Digest, ExecutorEnv, ExecutorImpl, NullSegmentRef, ProveKeccakRequest, ProveZkrRequest, Segment};
+use risc0_zkvm::{CoprocessorCallback, Digest, ExecutorEnv, ExecutorImpl, NullSegmentRef, ProveKeccakRequest, Segment};
 use boundless_market::input::GuestEnv;
 
 const V2_ELF_MAGIC: &[u8] = b"R0BF";
@@ -76,11 +76,6 @@ impl CoprocessorCallback for Coprocessor {
         if let Err(_) = self.keccak_tx.blocking_send(request) {
             println!("Failed to send Keccak proof request");
         }
-        Ok(())
-    }
-
-    fn prove_zkr(&mut self, _request: ProveZkrRequest) -> Result<()> {
-        // TODO: Implement ZKR proving when needed
         Ok(())
     }
 }
