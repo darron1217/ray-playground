@@ -27,6 +27,10 @@ struct Args {
     /// Only log file sizes without saving files (dry-run mode)
     #[arg(long)]
     dry_run: bool,
+    
+    /// Save segments and keccak data as JSON instead of binary
+    #[arg(long)]
+    json_output: bool,
 }
 
 pub type KeccakState = [u64; 25];
@@ -130,7 +134,7 @@ impl LocalExecutor {
         Ok(input_data)
     }
 
-    async fn execute_locally(&self, elf_path: &str, input_path: &str, output_dir: &str, dry_run: bool) -> Result<LocalExecutionResult> {
+    async fn execute_locally(&self, elf_path: &str, input_path: &str, output_dir: &str, dry_run: bool, json_output: bool) -> Result<LocalExecutionResult> {
         println!("Executing locally...");
         
         let start_time = std::time::Instant::now();
@@ -143,7 +147,7 @@ impl LocalExecutor {
         println!("Input data size: {} bytes", input_data.len());
         
         // Execute with zkVM
-        let result = self.execute_with_zkvm(&elf_data, &input_data, output_dir, dry_run).await?;
+        let result = self.execute_with_zkvm(&elf_data, &input_data, output_dir, dry_run, json_output).await?;
         
         let execution_time = start_time.elapsed().as_millis();
         
@@ -158,7 +162,7 @@ impl LocalExecutor {
     }
 
 
-    async fn execute_with_zkvm(&self, elf_data: &[u8], input_data: &[u8], output_dir: &str, dry_run: bool) -> Result<ExecutionResult> {
+    async fn execute_with_zkvm(&self, elf_data: &[u8], input_data: &[u8], output_dir: &str, dry_run: bool, json_output: bool) -> Result<ExecutionResult> {
         let (segment_tx, mut segment_rx) = mpsc::channel::<Segment>(100);
         let (keccak_tx, mut keccak_rx) = mpsc::channel::<ProveKeccakRequest>(100);
         
@@ -183,21 +187,42 @@ impl LocalExecutor {
                 segment_count += 1;
                 println!("Processing segment {}: index={}", segment_count, segment.index);
                 
-                if let Ok(segment_data) = bincode::serialize(&segment) {
-                    if dry_run {
-                        // Dry run mode: only log the size
-                        println!("Segment {} would be saved with size: {} bytes", segment.index, segment_data.len());
-                    } else {
-                        // Normal mode: save segment to file
-                        let segment_path = Path::new(&segment_output_dir).join(format!("segment_{:04}.bin", segment.index));
-                        if let Err(e) = fs::write(&segment_path, &segment_data) {
-                            eprintln!("Failed to save segment {}: {}", segment.index, e);
+                if json_output {
+                    // JSON mode: serialize as JSON
+                    if let Ok(segment_json) = serde_json::to_string_pretty(&segment) {
+                        if dry_run {
+                            // Dry run mode: only log the size
+                            println!("Segment {} would be saved as JSON with size: {} bytes", segment.index, segment_json.len());
                         } else {
-                            println!("Saved segment {} to: {} ({} bytes)", segment.index, segment_path.display(), segment_data.len());
+                            // Normal mode: save segment as JSON file
+                            let segment_path = Path::new(&segment_output_dir).join(format!("segment_{:04}.json", segment.index));
+                            if let Err(e) = fs::write(&segment_path, &segment_json) {
+                                eprintln!("Failed to save segment {}: {}", segment.index, e);
+                            } else {
+                                println!("Saved segment {} to: {} ({} bytes)", segment.index, segment_path.display(), segment_json.len());
+                            }
                         }
+                    } else {
+                        eprintln!("Failed to serialize segment {} to JSON", segment.index);
                     }
                 } else {
-                    eprintln!("Failed to serialize segment {}", segment.index);
+                    // Binary mode: serialize as binary
+                    if let Ok(segment_data) = bincode::serialize(&segment) {
+                        if dry_run {
+                            // Dry run mode: only log the size
+                            println!("Segment {} would be saved with size: {} bytes", segment.index, segment_data.len());
+                        } else {
+                            // Normal mode: save segment to file
+                            let segment_path = Path::new(&segment_output_dir).join(format!("segment_{:04}.bin", segment.index));
+                            if let Err(e) = fs::write(&segment_path, &segment_data) {
+                                eprintln!("Failed to save segment {}: {}", segment.index, e);
+                            } else {
+                                println!("Saved segment {} to: {} ({} bytes)", segment.index, segment_path.display(), segment_data.len());
+                            }
+                        }
+                    } else {
+                        eprintln!("Failed to serialize segment {}", segment.index);
+                    }
                 }
             }
             segment_count
@@ -211,21 +236,43 @@ impl LocalExecutor {
                 println!("Received Keccak proof request: {}", keccak_count);
 
                 let serializable_request = SerializableKeccakRequest::from(&request);
-                if let Ok(keccak_data) = bincode::serialize(&serializable_request) {
-                    if dry_run {
-                        // Dry run mode: only log the size
-                        println!("Keccak proof request {} would be saved with size: {} bytes", keccak_count, keccak_data.len());
-                    } else {
-                        // Normal mode: save keccak request to file
-                        let keccak_path = Path::new(&keccak_output_dir).join(format!("keccak_{:04}.bin", keccak_count));
-                        if let Err(e) = fs::write(&keccak_path, &keccak_data) {
-                            eprintln!("Failed to save Keccak proof request {}: {}", keccak_count, e);
+                
+                if json_output {
+                    // JSON mode: serialize as JSON
+                    if let Ok(keccak_json) = serde_json::to_string_pretty(&serializable_request) {
+                        if dry_run {
+                            // Dry run mode: only log the size
+                            println!("Keccak proof request {} would be saved as JSON with size: {} bytes", keccak_count, keccak_json.len());
                         } else {
-                            println!("Saved Keccak proof request {} to: {} ({} bytes)", keccak_count, keccak_path.display(), keccak_data.len());
+                            // Normal mode: save keccak request as JSON file
+                            let keccak_path = Path::new(&keccak_output_dir).join(format!("keccak_{:04}.json", keccak_count));
+                            if let Err(e) = fs::write(&keccak_path, &keccak_json) {
+                                eprintln!("Failed to save Keccak proof request {}: {}", keccak_count, e);
+                            } else {
+                                println!("Saved Keccak proof request {} to: {} ({} bytes)", keccak_count, keccak_path.display(), keccak_json.len());
+                            }
                         }
+                    } else {
+                        eprintln!("Failed to serialize Keccak proof request {} to JSON", keccak_count);
                     }
                 } else {
-                    eprintln!("Failed to serialize Keccak proof request {}", keccak_count);
+                    // Binary mode: serialize as binary
+                    if let Ok(keccak_data) = bincode::serialize(&serializable_request) {
+                        if dry_run {
+                            // Dry run mode: only log the size
+                            println!("Keccak proof request {} would be saved with size: {} bytes", keccak_count, keccak_data.len());
+                        } else {
+                            // Normal mode: save keccak request to file
+                            let keccak_path = Path::new(&keccak_output_dir).join(format!("keccak_{:04}.bin", keccak_count));
+                            if let Err(e) = fs::write(&keccak_path, &keccak_data) {
+                                eprintln!("Failed to save Keccak proof request {}: {}", keccak_count, e);
+                            } else {
+                                println!("Saved Keccak proof request {} to: {} ({} bytes)", keccak_count, keccak_path.display(), keccak_data.len());
+                            }
+                        }
+                    } else {
+                        eprintln!("Failed to serialize Keccak proof request {}", keccak_count);
+                    }
                 }
             }
             keccak_count
@@ -323,7 +370,7 @@ async fn main() -> Result<()> {
     let executor = LocalExecutor::new();
 
     // Execute locally using file paths
-    let result = executor.execute_locally(&args.elf_path, &args.input_path, &args.output_dir, args.dry_run).await
+    let result = executor.execute_locally(&args.elf_path, &args.input_path, &args.output_dir, args.dry_run, args.json_output).await
         .context("Failed to execute locally")?;
 
     println!("Execution completed:");
