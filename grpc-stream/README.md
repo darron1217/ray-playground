@@ -4,23 +4,43 @@ A Rust server and Python client implementation demonstrating bidirectional gRPC 
 
 ## Features
 
-- **1-minute streaming duration**: Connection maintained for exactly 60 seconds
+- **Configurable message count**: Send a specified number of messages (default: 10)
+- **1-second message intervals**: Messages sent at regular 1-second intervals
 - **Message acknowledgments**: Client sends ACK responses for received messages
 - **Retry logic**: Server retries unacknowledged messages up to 3 times
 - **Message drop simulation**: Client simulates 10% message drop rate for testing
+- **Smart auto-shutdown**: Server automatically closes after all messages are processed
+- **Clear logging**: Distinguishable logs with [RUST SERVER] and [PYTHON CLIENT] prefixes
 
 ## Setup
 
-### Rust Server
+### Quick Start
+
+Use the provided script to run both server and client:
 
 ```bash
-cd rust-server
-cargo build
-cargo run
+# Run with default 10 messages
+./run.sh
+
+# Run with custom message count (e.g., 5 messages)
+./run.sh 5
 ```
 
-### Python Client
+### Manual Setup
 
+#### Rust Server
+```bash
+cd rust-server
+cargo build --release
+
+# Run with default 10 messages
+cargo run --release
+
+# Run with custom message count
+cargo run --release 15
+```
+
+#### Python Client
 ```bash
 cd python-client
 pip install -r requirements.txt
@@ -36,21 +56,44 @@ python client.py
 - `StreamMessage`: Union type wrapping both message types
 
 ### Rust Server Features
-- Sends messages every 100ms for 1 minute
-- Tracks pending messages requiring acknowledgment
-- Retries unacknowledged messages after 2 seconds (max 3 retries)
-- Handles client acknowledgments to remove messages from retry queue
+- **Configurable message sending**: Accepts command-line argument for message count
+- **1-second intervals**: Sends messages at regular 1-second intervals
+- **Pending message tracking**: Maintains queue of unacknowledged messages
+- **Smart retry logic**: Retries unacknowledged messages after 2 seconds (max 3 retries)
+- **Automatic shutdown**: Closes connection after all messages are processed or max retries reached
+- **Clear logging**: All logs prefixed with `[RUST SERVER]`
 
 ### Python Client Features
-- Receives messages from server
-- Simulates 10% message drop rate for testing retry logic
-- Sends acknowledgments for successfully received messages
-- Handles bidirectional streaming with async/await
+- **Async message handling**: Receives messages from server asynchronously
+- **Drop simulation**: Simulates 10% message drop rate for testing retry logic
+- **Acknowledgment responses**: Sends ACK for successfully received messages
+- **Graceful termination**: Handles server disconnection properly
+- **Clear logging**: All logs prefixed with `[PYTHON CLIENT]`
 
-## Testing
+## Usage Examples
 
-Run both server and client simultaneously to observe:
-1. Message streaming for 60 seconds
-2. Acknowledgment flow
-3. Retry behavior for dropped messages
-4. Connection termination after 1 minute
+### Basic Usage
+```bash
+# Send 5 messages with 1-second intervals
+./run.sh 5
+```
+
+### Expected Output
+```
+[RUST SERVER] Starting gRPC server on [::1]:50051
+[RUST SERVER] Will send 5 messages at 1-second intervals
+[RUST SERVER] Sent message 1/5
+[PYTHON CLIENT] Received message 1: Message 1
+[PYTHON CLIENT] Sent ACK for message 1
+[RUST SERVER] Received ACK for message 1
+...
+[RUST SERVER] All messages completed, stopping retry handler
+```
+
+## Testing Scenarios
+
+Run the demo to observe:
+1. **Normal flow**: Messages sent and acknowledged
+2. **Drop simulation**: Client drops ~10% of messages
+3. **Retry behavior**: Server retries dropped messages after 2 seconds
+4. **Automatic termination**: Clean shutdown after all messages processed
