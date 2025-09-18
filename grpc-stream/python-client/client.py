@@ -32,9 +32,9 @@ class StreamingClient:
                         # 타임아웃 시에도 스트림이 종료되지 않았다면 계속 대기
                         continue
                     except Exception as e:
-                        print(f"Error in request_generator: {e}")
+                        print(f"[PYTHON CLIENT] Error in request_generator: {e}")
                         break
-                print("Request generator finished")
+                print("[PYTHON CLIENT] Request generator finished")
 
             try:
                 call = stub.BidirectionalStream(request_generator())
@@ -44,13 +44,13 @@ class StreamingClient:
                         data_msg = response.data
                         message_id = data_msg.id
                         
-                        print(f"Received message {message_id}: {data_msg.payload}")
+                        print(f"[PYTHON CLIENT] Received message {message_id}: {data_msg.payload}")
                         
                         should_drop = (self.should_simulate_drops and 
                                      random.random() < self.drop_probability)
                         
                         if should_drop:
-                            print(f"Simulating drop for message {message_id}")
+                            print(f"[PYTHON CLIENT] Simulating drop for message {message_id}")
                         else:
                             self.received_messages.add(message_id)
                             
@@ -62,23 +62,23 @@ class StreamingClient:
                             )
                             
                             await self.response_queue.put(ack)
-                            print(f"Sent ACK for message {message_id}")
+                            print(f"[PYTHON CLIENT] Sent ACK for message {message_id}")
                 
                 # 서버 스트림이 종료되면 request_generator도 종료
-                print("Server stream ended, finishing client...")
+                print("[PYTHON CLIENT] Server stream ended, finishing client...")
                 stream_finished.set()
                             
             except grpc.aio.AioRpcError as e:
-                print(f"RPC error: {e}")
+                print(f"[PYTHON CLIENT] RPC error: {e}")
                 stream_finished.set()
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"[PYTHON CLIENT] Unexpected error: {e}")
                 stream_finished.set()
 
     def run(self):
-        print("Starting Python gRPC client...")
-        print(f"Connecting to server at {self.server_address}")
-        print(f"Simulating message drops with {self.drop_probability * 100}% probability")
+        print("[PYTHON CLIENT] Starting Python gRPC client...")
+        print(f"[PYTHON CLIENT] Connecting to server at {self.server_address}")
+        print(f"[PYTHON CLIENT] Simulating message drops with {self.drop_probability * 100}% probability")
         
         asyncio.run(self.bidirectional_stream())
 

@@ -78,11 +78,11 @@ impl StreamingService for StreamingServer {
                     break;
                 }
 
-                println!("Sent message {}/{}", message_id, total_messages);
+                println!("[RUST SERVER] Sent message {}/{}", message_id, total_messages);
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             
-            println!("All {} messages sent, waiting for ACKs and retries...", total_messages);
+            println!("[RUST SERVER] All {} messages sent, waiting for ACKs and retries...", total_messages);
         });
 
         let tx_retry = tx.clone();
@@ -110,7 +110,7 @@ impl StreamingService for StreamingServer {
                             msg.sent_at = current_time;
                             to_retry.push((*id, msg.message.clone()));
                         } else if msg.retry_count >= 3 {
-                            println!("Message {} failed after 3 retries", id);
+                            println!("[RUST SERVER] Message {} failed after 3 retries", id);
                         }
                     }
                     
@@ -120,20 +120,20 @@ impl StreamingService for StreamingServer {
 
                 // 재전송
                 for (id, data_msg) in to_retry {
-                    println!("Retrying message {}", id);
+                    println!("[RUST SERVER] Retrying message {}", id);
                     let stream_msg = StreamMessage {
                         message_type: Some(streaming::stream_message::MessageType::Data(data_msg)),
                     };
                     
                     if tx_retry.send(Ok(stream_msg)).await.is_err() {
-                        println!("Failed to send retry message, stopping retry handler");
+                        println!("[RUST SERVER] Failed to send retry message, stopping retry handler");
                         return;
                     }
                 }
                 
                 // 모든 메시지가 완료되면 종료
                 if all_completed {
-                    println!("All messages completed, stopping retry handler");
+                    println!("[RUST SERVER] All messages completed, stopping retry handler");
                     break;
                 }
             }
@@ -144,13 +144,13 @@ impl StreamingService for StreamingServer {
                 match message {
                     Ok(stream_msg) => {
                         if let Some(streaming::stream_message::MessageType::Ack(ack)) = stream_msg.message_type {
-                            println!("Received ACK for message {}", ack.ack_id);
+                            println!("[RUST SERVER] Received ACK for message {}", ack.ack_id);
                             let mut pending = pending_messages_ack.lock().await;
                             pending.remove(&ack.ack_id);
                         }
                     }
                     Err(e) => {
-                        println!("Error receiving message: {}", e);
+                        println!("[RUST SERVER] Error receiving message: {}", e);
                         break;
                     }
                 }
@@ -161,18 +161,18 @@ impl StreamingService for StreamingServer {
         tokio::spawn(async move {
             // 메시지 전송 완료 대기
             let _ = message_sender.await;
-            println!("Message sending completed, waiting for retries to finish...");
+            println!("[RUST SERVER] Message sending completed, waiting for retries to finish...");
             
             // 재전송 핸들러 완료 대기
             let _ = retry_handler.await;
             
             // 모든 채널 닫기
             drop(tx);
-            println!("All messages processed, closing stream");
+            println!("[RUST SERVER] All messages processed, closing stream");
             
             // ACK 핸들러 완료 대기
             let _ = ack_handler.await;
-            println!("Stream closed completely");
+            println!("[RUST SERVER] Stream closed completely");
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -194,8 +194,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_messages: message_count,
     };
 
-    println!("Starting gRPC server on {}", addr);
-    println!("Will send {} messages at 1-second intervals", message_count);
+    println!("[RUST SERVER] Starting gRPC server on {}", addr);
+    println!("[RUST SERVER] Will send {} messages at 1-second intervals", message_count);
 
     // 서버 실행 (스트림이 자동으로 종료되면 서버도 종료됨)
     Server::builder()
