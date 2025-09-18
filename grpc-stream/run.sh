@@ -40,7 +40,9 @@ cd rust-server
 cargo build --release > /dev/null 2>&1
 
 echo "Starting Rust server..."
-cargo run --release &
+MESSAGE_COUNT=${1:-5}  # 기본값 5개, 첫 번째 인자로 변경 가능
+echo "Will send $MESSAGE_COUNT messages"
+cargo run --release $MESSAGE_COUNT &
 SERVER_PID=$!
 cd ..
 
@@ -65,7 +67,7 @@ cd ..
 
 echo ""
 echo "Both server and client are running!"
-echo "The demo will run for 1 minute..."
+echo "Server will send $MESSAGE_COUNT messages and auto-shutdown"
 echo "Press Ctrl+C to stop early"
 echo ""
 

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
@@ -24,6 +25,7 @@ struct PendingMessage {
 #[derive(Default)]
 struct StreamingServer {
     pending_messages: Arc<Mutex<HashMap<u64, PendingMessage>>>,
+    total_messages: u64,
 }
 
 #[tonic::async_trait]
@@ -37,27 +39,18 @@ impl StreamingService for StreamingServer {
         let mut in_stream = request.into_inner();
         let (tx, rx) = mpsc::channel(128);
         let pending_messages = self.pending_messages.clone();
+        let pending_messages_sender = pending_messages.clone();
         let pending_messages_retry = pending_messages.clone();
         let pending_messages_ack = pending_messages.clone();
 
         let tx_clone = tx.clone();
+        let total_messages = self.total_messages;
         let message_sender = tokio::spawn(async move {
-            let mut message_id = 1u64;
-            let start_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            loop {
+            for message_id in 1..=total_messages {
                 let current_time = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-
-                if current_time - start_time > 60 {
-                    println!("1 minute elapsed, stopping stream");
-                    break;
-                }
 
                 let data_msg = DataMessage {
                     id: message_id,
@@ -73,7 +66,7 @@ impl StreamingService for StreamingServer {
                 };
 
                 {
-                    let mut pending = pending_messages.lock().await;
+                    let mut pending = pending_messages_sender.lock().await;
                     pending.insert(message_id, pending_msg);
                 }
 
@@ -85,64 +78,65 @@ impl StreamingService for StreamingServer {
                     break;
                 }
 
-                message_id += 1;
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                println!("Sent message {}/{}", message_id, total_messages);
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             
-            // 메시지 전송 완료 후 채널 닫기
-            drop(tx_clone);
-            println!("Message sender finished and closed channel");
+            println!("All {} messages sent, waiting for ACKs and retries...", total_messages);
         });
 
         let tx_retry = tx.clone();
         let retry_handler = tokio::spawn(async move {
-            let mut retry_interval = tokio::time::interval(Duration::from_secs(1));
+            let mut retry_interval = tokio::time::interval(Duration::from_secs(2));
             
             loop {
-                tokio::select! {
-                    _ = retry_interval.tick() => {
-                        let current_time = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
+                retry_interval.tick().await;
+                
+                let current_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
 
-                        let mut to_retry = Vec::new();
-                        
-                        {
-                            let mut pending = pending_messages_retry.lock().await;
-                            for (id, msg) in pending.iter_mut() {
-                                if current_time - msg.sent_at > 2 && msg.retry_count < 3 {
-                                    msg.retry_count += 1;
-                                    msg.sent_at = current_time;
-                                    to_retry.push((*id, msg.message.clone()));
-                                } else if msg.retry_count >= 3 {
-                                    println!("Message {} failed after 3 retries", id);
-                                }
-                            }
-                        }
-
-                        for (id, data_msg) in to_retry {
-                            println!("Retrying message {}", id);
-                            let stream_msg = StreamMessage {
-                                message_type: Some(streaming::stream_message::MessageType::Data(data_msg)),
-                            };
-                            
-                            if tx_retry.send(Ok(stream_msg)).await.is_err() {
-                                println!("Failed to send retry message, stopping retry handler");
-                                break;
-                            }
+                let mut to_retry = Vec::new();
+                let mut all_completed = false;
+                
+                {
+                    let mut pending = pending_messages_retry.lock().await;
+                    
+                    // 재전송할 메시지 찾기
+                    for (id, msg) in pending.iter_mut() {
+                        if current_time - msg.sent_at > 2 && msg.retry_count < 3 {
+                            msg.retry_count += 1;
+                            msg.sent_at = current_time;
+                            to_retry.push((*id, msg.message.clone()));
+                        } else if msg.retry_count >= 3 {
+                            println!("Message {} failed after 3 retries", id);
                         }
                     }
-                    else => {
-                        println!("Retry handler stopping");
-                        break;
+                    
+                    // 모든 메시지가 완료되었는지 확인 (실패한 메시지 제외)
+                    all_completed = pending.iter().all(|(_, msg)| msg.retry_count >= 3) || pending.is_empty();
+                }
+
+                // 재전송
+                for (id, data_msg) in to_retry {
+                    println!("Retrying message {}", id);
+                    let stream_msg = StreamMessage {
+                        message_type: Some(streaming::stream_message::MessageType::Data(data_msg)),
+                    };
+                    
+                    if tx_retry.send(Ok(stream_msg)).await.is_err() {
+                        println!("Failed to send retry message, stopping retry handler");
+                        return;
                     }
                 }
+                
+                // 모든 메시지가 완료되면 종료
+                if all_completed {
+                    println!("All messages completed, stopping retry handler");
+                    break;
+                }
             }
-            
-            // 재시도 핸들러 완료 후 채널 닫기
-            drop(tx_retry);
-            println!("Retry handler finished and closed channel");
         });
 
         let ack_handler = tokio::spawn(async move {
@@ -163,21 +157,22 @@ impl StreamingService for StreamingServer {
             }
         });
 
-        // 메시지 전송 완료 후 남은 채널들을 정리
+        // 모든 작업 완료 후 스트림 종료
         tokio::spawn(async move {
-            // 메시지 전송이 완료될 때까지 대기
+            // 메시지 전송 완료 대기
             let _ = message_sender.await;
+            println!("Message sending completed, waiting for retries to finish...");
             
-            // 짧은 대기 후 retry handler도 종료
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // 재전송 핸들러 완료 대기
+            let _ = retry_handler.await;
             
             // 모든 채널 닫기
             drop(tx);
-            println!("Main tx channel closed, stream will terminate");
+            println!("All messages processed, closing stream");
             
-            // ack_handler와 retry_handler 완료 대기
-            let _ = tokio::join!(retry_handler, ack_handler);
-            println!("All message handlers finished, stream closed");
+            // ACK 핸들러 완료 대기
+            let _ = ack_handler.await;
+            println!("Stream closed completely");
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -186,11 +181,23 @@ impl StreamingService for StreamingServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    let message_count = if args.len() > 1 {
+        args[1].parse::<u64>().unwrap_or(10)
+    } else {
+        10
+    };
+
     let addr = "[::1]:50051".parse()?;
-    let streaming_server = StreamingServer::default();
+    let streaming_server = StreamingServer {
+        pending_messages: Arc::new(Mutex::new(HashMap::new())),
+        total_messages: message_count,
+    };
 
     println!("Starting gRPC server on {}", addr);
+    println!("Will send {} messages at 1-second intervals", message_count);
 
+    // 서버 실행 (스트림이 자동으로 종료되면 서버도 종료됨)
     Server::builder()
         .add_service(StreamingServiceServer::new(streaming_server))
         .serve(addr)
