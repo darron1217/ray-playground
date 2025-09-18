@@ -8,3 +8,6 @@
 # Cargo
 target/
 output/
+
+# Python
+__pycache__/

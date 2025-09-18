@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package streaming;
+
+service StreamingService {
+  rpc BidirectionalStream(stream StreamMessage) returns (stream StreamMessage);
+}
+
+message StreamMessage {
+  oneof message_type {
+    DataMessage data = 1;
+    AckMessage ack = 2;
+  }
+}
+
+message DataMessage {
+  uint64 id = 1;
+  uint64 timestamp = 2;
+  string payload = 3;
+  bool needs_ack = 4;
+}
+
+message AckMessage {
+  uint64 ack_id = 1;
+  uint64 timestamp = 2;
+}
