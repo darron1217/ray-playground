@@ -45,6 +45,9 @@ impl StreamingService for StreamingServer {
 
         let tx_clone = tx.clone();
         let total_messages = self.total_messages;
+        let message_sending_finished = Arc::new(tokio::sync::Notify::new());
+        let message_sending_finished_notify = message_sending_finished.clone();
+        
         let message_sender = tokio::spawn(async move {
             for message_id in 1..=total_messages {
                 let current_time = SystemTime::now()
@@ -83,58 +86,69 @@ impl StreamingService for StreamingServer {
             }
             
             println!("[RUST SERVER] All {} messages sent, waiting for ACKs and retries...", total_messages);
+            // retry handler에게 메시지 전송 완료 알림
+            message_sending_finished_notify.notify_one();
         });
 
         let tx_retry = tx.clone();
+        let message_sending_finished_clone = message_sending_finished.clone();
+        
         let retry_handler = tokio::spawn(async move {
             let mut retry_interval = tokio::time::interval(Duration::from_secs(2));
+            let mut message_sending_done = false;
             
             loop {
-                retry_interval.tick().await;
-                
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                tokio::select! {
+                    _ = retry_interval.tick() => {
+                        let current_time = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
 
-                let mut to_retry = Vec::new();
-                let mut all_completed = false;
-                
-                {
-                    let mut pending = pending_messages_retry.lock().await;
-                    
-                    // 재전송할 메시지 찾기
-                    for (id, msg) in pending.iter_mut() {
-                        if current_time - msg.sent_at > 2 && msg.retry_count < 3 {
-                            msg.retry_count += 1;
-                            msg.sent_at = current_time;
-                            to_retry.push((*id, msg.message.clone()));
-                        } else if msg.retry_count >= 3 {
-                            println!("[RUST SERVER] Message {} failed after 3 retries", id);
+                        let mut to_retry = Vec::new();
+                        let mut all_completed = false;
+                        
+                        {
+                            let mut pending = pending_messages_retry.lock().await;
+                            
+                            // 재전송할 메시지 찾기
+                            for (id, msg) in pending.iter_mut() {
+                                if current_time - msg.sent_at > 2 && msg.retry_count < 3 {
+                                    msg.retry_count += 1;
+                                    msg.sent_at = current_time;
+                                    to_retry.push((*id, msg.message.clone()));
+                                } else if msg.retry_count >= 3 {
+                                    println!("[RUST SERVER] Message {} failed after 3 retries", id);
+                                }
+                            }
+                            
+                            // 모든 메시지가 완료되었는지 확인 (메시지 전송이 끝나고 pending이 비어있을 때만)
+                            all_completed = message_sending_done && pending.is_empty();
+                        }
+
+                        // 재전송
+                        for (id, data_msg) in to_retry {
+                            println!("[RUST SERVER] Retrying message {}", id);
+                            let stream_msg = StreamMessage {
+                                message_type: Some(streaming::stream_message::MessageType::Data(data_msg)),
+                            };
+                            
+                            if tx_retry.send(Ok(stream_msg)).await.is_err() {
+                                println!("[RUST SERVER] Failed to send retry message, stopping retry handler");
+                                return;
+                            }
+                        }
+                        
+                        // 모든 메시지가 완료되면 종료
+                        if all_completed {
+                            println!("[RUST SERVER] All messages completed, stopping retry handler");
+                            break;
                         }
                     }
-                    
-                    // 모든 메시지가 완료되었는지 확인 (실패한 메시지 제외)
-                    all_completed = pending.iter().all(|(_, msg)| msg.retry_count >= 3) || pending.is_empty();
-                }
-
-                // 재전송
-                for (id, data_msg) in to_retry {
-                    println!("[RUST SERVER] Retrying message {}", id);
-                    let stream_msg = StreamMessage {
-                        message_type: Some(streaming::stream_message::MessageType::Data(data_msg)),
-                    };
-                    
-                    if tx_retry.send(Ok(stream_msg)).await.is_err() {
-                        println!("[RUST SERVER] Failed to send retry message, stopping retry handler");
-                        return;
+                    _ = message_sending_finished_clone.notified() => {
+                        println!("[RUST SERVER] Message sending finished, retry handler will continue until all ACKs received");
+                        message_sending_done = true;
                     }
-                }
-                
-                // 모든 메시지가 완료되면 종료
-                if all_completed {
-                    println!("[RUST SERVER] All messages completed, stopping retry handler");
-                    break;
                 }
             }
         });
