@@ -54,8 +54,8 @@ impl StreamingService for StreamingServer {
                     .unwrap()
                     .as_secs();
 
-                if current_time - start_time > 10 {
-                    println!("10 seconds elapsed, stopping stream");
+                if current_time - start_time > 60 {
+                    println!("1 minute elapsed, stopping stream");
                     break;
                 }
 
