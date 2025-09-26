@@ -31,6 +31,10 @@ struct Args {
     /// Save segments and keccak data as JSON instead of binary
     #[arg(long)]
     json_output: bool,
+    
+    /// Segment limit in powers of 2 (default: 21)
+    #[arg(long, default_value = "21")]
+    segment_limit_po2: u32,
 }
 
 pub type KeccakState = [u64; 25];
@@ -129,7 +133,7 @@ impl LocalExecutor {
         Ok(input_data)
     }
 
-    async fn execute_locally(&self, elf_path: &str, input_path: &str, output_dir: &str, dry_run: bool, json_output: bool) -> Result<LocalExecutionResult> {
+    async fn execute_locally(&self, elf_path: &str, input_path: &str, output_dir: &str, dry_run: bool, json_output: bool, segment_limit_po2: u32) -> Result<LocalExecutionResult> {
         println!("Executing locally...");
         
         let start_time = std::time::Instant::now();
@@ -142,7 +146,7 @@ impl LocalExecutor {
         println!("Input data size: {} bytes", input_data.len());
         
         // Execute with zkVM
-        let result = self.execute_with_zkvm(&elf_data, &input_data, output_dir, dry_run, json_output).await?;
+        let result = self.execute_with_zkvm(&elf_data, &input_data, output_dir, dry_run, json_output, segment_limit_po2).await?;
         
         let execution_time = start_time.elapsed().as_millis();
         
@@ -157,7 +161,7 @@ impl LocalExecutor {
     }
 
 
-    async fn execute_with_zkvm(&self, elf_data: &[u8], input_data: &[u8], output_dir: &str, dry_run: bool, json_output: bool) -> Result<ExecutionResult> {
+    async fn execute_with_zkvm(&self, elf_data: &[u8], input_data: &[u8], output_dir: &str, dry_run: bool, json_output: bool, segment_limit_po2: u32) -> Result<ExecutionResult> {
         let (segment_tx, mut segment_rx) = mpsc::channel::<Segment>(100);
         let (keccak_tx, mut keccak_rx) = mpsc::channel::<ProveKeccakRequest>(100);
         
@@ -283,7 +287,7 @@ impl LocalExecutor {
                 .write_slice(&decoded_input_data)
                 .session_limit(Some(exec_limit)) // 10M cycle limit
                 .coprocessor_callback(coproc)
-                .segment_limit_po2(23)
+                .segment_limit_po2(segment_limit_po2)
                 .build()?;
             
             // Create executor from ELF
@@ -365,7 +369,7 @@ async fn main() -> Result<()> {
     let executor = LocalExecutor::new();
 
     // Execute locally using file paths
-    let result = executor.execute_locally(&args.elf_path, &args.input_path, &args.output_dir, args.dry_run, args.json_output).await
+    let result = executor.execute_locally(&args.elf_path, &args.input_path, &args.output_dir, args.dry_run, args.json_output, args.segment_limit_po2).await
         .context("Failed to execute locally")?;
 
     println!("Execution completed:");
