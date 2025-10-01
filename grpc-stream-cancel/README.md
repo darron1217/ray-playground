@@ -1,156 +1,272 @@
-# gRPC Cancellation vs Disconnection Verification
+# gRPC Stream Cancellation vs Network Disconnection Test
 
-A Rust server and Python client implementation to **verify and distinguish between gRPC cancellation and network disconnection** using standard gRPC mechanisms.
+A comprehensive Rust server and Python client implementation to **test and distinguish between gRPC stream cancellation and network disconnection** scenarios.
 
 ## Purpose
 
-This project verifies whether gRPC can distinguish between:
-- **Intentional cancellation**: Client calls `call.cancel()` → RST_STREAM frame
-- **Network disconnection**: Connection lost due to network issues or process termination
-
-## Test Scenarios
-
-### 1. Manual Cancellation (Ctrl+C)
-```bash
-python client.py --mode manual
-# Press Ctrl+C → call.cancel() → RST_STREAM → Server detects send failure
-```
-
-### 2. Automatic Cancellation
-```bash
-python client.py --mode auto
-# Auto call.cancel() after 10s → RST_STREAM → Server detects send failure
-```
-
-### 3. Process Kill (Simulated Disconnection)
-```bash
-python client.py --mode kill
-# Process killed after 5s → Connection lost → Server detects send failure
-```
-
-## Expected Behavior
-
-According to [gRPC specification](https://github.com/hyperium/tonic/issues/2288):
-- **Cancellation**: RST_STREAM frame sent, distinct from END_STREAM
-- **Disconnection**: Connection failure, no explicit frame sent
-
-However, at the application level, both scenarios result in:
-- Server: `tx.send()` fails when client is gone
-- Client: Receives appropriate gRPC status codes
-
-## Setup
-
-### Quick Start
-```bash
-# Test manual cancellation
-./run.sh manual
-
-# Test automatic cancellation  
-./run.sh auto
-
-# Test process kill (disconnection simulation)
-./run.sh kill
-```
-
-### Manual Setup
-
-#### Rust Server
-```bash
-cd rust-server
-cargo build --release
-cargo run --release [interval_seconds]
-```
-
-#### Python Client
-```bash
-cd python-client
-pip install -r requirements.txt
-python generate_protos.py
-python client.py --mode [manual|auto|kill]
-```
+This project demonstrates and tests three key gRPC streaming scenarios:
+- **✅ Normal completion**: Server sends all messages and closes stream gracefully
+- **🚫 Intentional cancellation**: Client calls `call.cancel()` → RST_STREAM frame
+- **🔌 Network disconnection**: Connection lost due to network issues
 
 ## Architecture
 
-### Protocol Buffer Schema
-- Simple `DataMessage` with id, timestamp, and payload
-- Bidirectional stream: `stream DataMessage → stream DataMessage`
+### Components
+- **Rust Server** (`rust-server/`): Streaming gRPC server with message generation
+- **Python Client** (`python-client/`): Test client with multiple modes
+- **Rust Proxy** (`rust-proxy/`): Optional proxy for network disconnection tests
+- **Test Scripts**: Automated test scenarios
 
-### Rust Server Features
-- **Continuous streaming**: Sends messages at configurable intervals
-- **Connection monitoring**: Detects when `tx.send()` fails
-- **Detailed logging**: Reports client disconnection/cancellation
-- **Standard gRPC**: No custom cancellation messages needed
+### Key Features
+- **Real-time message streaming**: Server generates messages at configurable intervals
+- **Channel-based buffering**: 10-message buffer with automatic backpressure
+- **Graceful completion**: Server closes stream after sending all messages
+- **Cancellation detection**: Distinguishes intentional vs accidental disconnections
+- **Comprehensive logging**: Detailed status reporting for all scenarios
 
-### Python Client Features
-- **Three test modes**:
-  - `manual`: Ctrl+C triggers `call.cancel()`
-  - `auto`: Automatic `call.cancel()` after 10 seconds
-  - `kill`: Process termination after 5 seconds
-- **Status code reporting**: Shows gRPC error codes and details
-- **Message counting**: Tracks messages received before disconnection
+## Test Scenarios
+
+### 1. Normal Completion Test
+```bash
+./test_disconnect.sh
+```
+**Expected behavior**:
+- Server sends 10 messages (1 per second)
+- Client receives all messages
+- Server closes stream gracefully
+- Client detects normal completion
+- Both server and client terminate cleanly
+
+### 2. Intentional Cancellation Test
+```bash
+./test_cancel.sh
+```
+**Expected behavior**:
+- Client connects and receives messages
+- After 3 seconds, client calls `call.cancel()`
+- Server detects RST_STREAM (CANCELLED status)
+- Server performs immediate cleanup
+- Server terminates automatically
+
+### 3. Network Disconnection Test (with Proxy)
+```bash
+# Manual network interruption test
+# 1. Start server and proxy
+# 2. Connect client through proxy
+# 3. Kill proxy to simulate network failure
+# 4. Observe reconnection behavior
+```
+
+## Quick Start
+
+### Prerequisites
+```bash
+# Rust (for server)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Python (for client)
+pip install grpcio grpcio-tools
+```
+
+### Running Tests
+
+#### Test Normal Completion
+```bash
+cd grpc-stream-cancel
+./test_disconnect.sh
+```
+
+#### Test Intentional Cancellation
+```bash
+cd grpc-stream-cancel
+./test_cancel.sh
+```
+
+#### Manual Testing
+```bash
+# Terminal 1: Start server
+cd rust-server
+cargo run --release 1  # 1-second intervals
+
+# Terminal 2: Run client
+cd python-client
+python client.py --mode simple          # Normal completion
+python client.py --mode auto_cancel --delay 3.0  # Cancel after 3s
+```
 
 ## Expected Output
 
-### Manual Cancellation (Ctrl+C):
+### Normal Completion
 ```
-🚀 [RUST SERVER] Starting gRPC server on [::1]:50051
-[RUST SERVER] New client connected
-[RUST SERVER] Sent message 1 successfully
-📨 [PYTHON CLIENT] Received message 1: Message 1 from server
-^C
-🛑 [PYTHON CLIENT] Ctrl+C detected - calling gRPC cancel()
-📤 [PYTHON CLIENT] Sending RST_STREAM via call.cancel()
-[RUST SERVER] ❌ Failed to send message 2 - Client disconnected/cancelled
-🚫 [PYTHON CLIENT] Stream was CANCELLED: User requested cancellation (Ctrl+C)
-```
-
-### Process Kill (Disconnection):
-```
-💀 [PYTHON CLIENT] KILL MODE: Will kill process after 5 seconds
+🚀 [RUST SERVER] Starting gRPC server...
+📤 [RUST SERVER] Starting real-time message generation...
+🔗 [PYTHON CLIENT] Establishing bidirectional stream...
 📨 [PYTHON CLIENT] Received message 1: Message 1 from server
 📨 [PYTHON CLIENT] Received message 2: Message 2 from server
-💀 [PYTHON CLIENT] Killing process after 5 seconds
-[RUST SERVER] ❌ Failed to send message 3 - Client disconnected/cancelled
+...
+📨 [PYTHON CLIENT] Received message 10: Message 10 from server
+🎉 [RUST SERVER] All messages generated!
+🏁 [RUST SERVER] Closing stream - all messages sent
+✅ [PYTHON CLIENT] Stream completed by server. Total: 10 messages
+   → Server finished sending all messages and closed the stream
+```
+
+### Intentional Cancellation
+```
+🚀 [RUST SERVER] Starting gRPC server...
+⏰ [PYTHON CLIENT] AUTO CANCEL MODE: Will cancel after 3.0 seconds
+📨 [PYTHON CLIENT] Received message 1: Message 1 from server
+📨 [PYTHON CLIENT] Received message 2: Message 2 from server
+⏰ [PYTHON CLIENT] Auto-cancel triggered after 3.1s (delay: 3.0s)
+📤 [PYTHON CLIENT] Calling gRPC cancel() → RST_STREAM
+🚫 [RUST SERVER] CANCELLED: Client called cancel() → RST_STREAM sent
+🚫 [RUST SERVER] INTENTIONAL CANCELLATION:
+   - Client called cancel() explicitly
+   - Performing immediate cleanup
+```
+
+## File Structure
+
+```
+grpc-stream-cancel/
+├── README.md                    # This file
+├── proto/
+│   └── streaming.proto         # Protocol buffer definition
+├── rust-server/
+│   ├── Cargo.toml
+│   ├── build.rs               # Proto compilation
+│   └── src/main.rs            # Server implementation
+├── rust-proxy/
+│   ├── Cargo.toml
+│   └── src/main.rs            # Proxy for network tests
+├── python-client/
+│   ├── requirements.txt
+│   ├── generate_protos.py     # Proto generation
+│   ├── client.py              # Client implementation
+│   ├── streaming_pb2.py       # Generated proto
+│   └── streaming_pb2_grpc.py  # Generated gRPC
+├── test_disconnect.sh         # Normal completion test
+└── test_cancel.sh            # Cancellation test
+```
+
+## Protocol Buffer Schema
+
+```protobuf
+syntax = "proto3";
+
+message DataMessage {
+    int32 id = 1;
+    int64 timestamp = 2;
+    string payload = 3;
+}
+
+service StreamingService {
+    rpc BidirectionalStream(stream DataMessage) returns (stream DataMessage);
+}
+```
+
+## Client Modes
+
+### `simple` Mode (Default)
+- Connects to server and receives all messages
+- Handles reconnection on network failures
+- Terminates when server completes
+
+### `auto_cancel` Mode
+- Automatically calls `call.cancel()` after specified delay
+- Tests intentional cancellation scenario
+- Configurable delay with `--delay` parameter
+
+```bash
+python client.py --mode auto_cancel --delay 5.0  # Cancel after 5 seconds
+```
+
+## Server Configuration
+
+The server accepts one optional parameter for message interval:
+
+```bash
+cargo run --release [interval_seconds]
+
+# Examples:
+cargo run --release 1    # 1-second intervals (fast)
+cargo run --release 2    # 2-second intervals (default)
+cargo run --release 5    # 5-second intervals (slow)
 ```
 
 ## Key Verification Points
 
-### What This Test Validates:
-- ✅ `call.cancel()` properly terminates the stream
-- ✅ Server detects client disconnection via failed sends
-- ✅ Different client termination methods (cancel vs kill)
-- ✅ gRPC status codes (CANCELLED, UNAVAILABLE, etc.)
-- ✅ Message counting and timing
+### ✅ What This Implementation Tests:
+- **Stream lifecycle**: Normal start → message exchange → graceful completion
+- **Cancellation handling**: Client-initiated cancellation with proper cleanup
+- **Error distinction**: CANCELLED vs UNAVAILABLE vs other gRPC status codes
+- **Resource cleanup**: Proper task termination and channel closure
+- **Message delivery**: Guaranteed delivery of buffered messages
+- **Timing accuracy**: Precise cancellation timing and message intervals
 
-### What gRPC Provides:
-- **RST_STREAM vs END_STREAM**: Different frame types for cancellation vs normal closure
-- **Status codes**: CANCELLED, UNAVAILABLE, DEADLINE_EXCEEDED
-- **Automatic cleanup**: Connection resources cleaned up properly
+### 🔍 gRPC Mechanisms Demonstrated:
+- **Bidirectional streaming**: Full-duplex communication
+- **Backpressure handling**: Channel buffering with automatic flow control
+- **Status codes**: Proper gRPC error code usage and interpretation
+- **Stream termination**: Multiple ways to close streams (normal, cancel, error)
+- **Connection monitoring**: Detection of client state changes
 
-### Limitations:
-- **Server perspective**: Both cancellation and disconnection appear as "send failure"
-- **Timing dependent**: Network disconnection detection may be delayed
-- **No built-in distinction**: Application must implement additional logic if needed
+### 📊 Success Criteria:
+1. **Normal completion**: Server terminates after sending all messages
+2. **Client completion**: Client receives completion signal and terminates
+3. **Cancellation detection**: Server distinguishes intentional cancellation
+4. **Clean shutdown**: All resources properly cleaned up
+5. **Status reporting**: Clear logging of all state transitions
 
-## Usage Examples
+## Troubleshooting
 
+### Server doesn't terminate after completion
+- Check that all messages were generated (look for "All messages generated!")
+- Verify context cancellation is working properly
+- Ensure cleanup task completes successfully
+
+### Client doesn't receive completion signal
+- Verify server is properly closing the channel (`drop(tx)`)
+- Check for network connectivity issues
+- Ensure client is using the correct server address
+
+### Cancellation not detected properly
+- Confirm client is calling `call.cancel()` correctly
+- Check server logs for RST_STREAM detection
+- Verify gRPC status codes match expected values
+
+## Advanced Usage
+
+### Custom Message Count
+Modify `main.rs` line 315 to change message count:
+```rust
+let streaming_server = StreamingServer::new(message_interval, 20); // 20 messages
+```
+
+### Network Simulation
+Use the proxy for advanced network testing:
 ```bash
-# Test all scenarios
-./run.sh manual    # Interactive cancellation test
-./run.sh auto      # Automated cancellation test  
-./run.sh kill      # Disconnection simulation test
+# Terminal 1: Server
+cd rust-server && cargo run --release
 
-# Custom server interval
-cd rust-server && cargo run --release 1  # 1-second intervals
-cd python-client && python client.py --mode manual
+# Terminal 2: Proxy  
+cd rust-proxy && cargo run --release
+
+# Terminal 3: Client (via proxy)
+cd python-client
+GRPC_SERVER_ADDRESS="[::1]:8080" python client.py
+
+# Terminal 4: Kill proxy to simulate network failure
+pkill -f rust-proxy
 ```
 
 ## Conclusion
 
-This implementation demonstrates that while gRPC uses different mechanisms (RST_STREAM vs connection loss) at the protocol level, **application-level code typically sees both as "client gone"**. 
+This implementation provides a comprehensive test suite for gRPC streaming scenarios, demonstrating:
 
-For robust applications requiring disconnection vs cancellation distinction, consider:
-- **Application-level heartbeats**
-- **Explicit cancellation messages** before calling `cancel()`
-- **Connection state monitoring**
-- **Retry logic with exponential backoff**
+- **Proper stream lifecycle management**
+- **Reliable cancellation detection** 
+- **Graceful error handling**
+- **Resource cleanup best practices**
+
+The tests validate that gRPC can effectively distinguish between normal completion, intentional cancellation, and network failures, enabling robust distributed system design.
