@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package streaming;
+
+service StreamingService {
+  rpc BidirectionalStream(stream DataMessage) returns (stream DataMessage);
+}
+
+message DataMessage {
+  uint64 id = 1;
+  uint64 timestamp = 2;
+  string payload = 3;
+}
